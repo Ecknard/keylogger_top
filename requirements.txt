@@ -1,0 +1,55 @@
+# ============================================================
+# requirements.txt — TP1 AI-Driven Malware
+# TP1 — Intelligence Artificielle & Cybersécurité
+# ============================================================
+# Installation : pip install -r requirements.txt
+
+# ---------------------
+# Partie I — Keylogger
+# ---------------------
+pynput>=1.7.6
+
+# ----------------------------------
+# Partie II — IA : Sentiments + ML
+# ----------------------------------
+vaderSentiment>=3.3.2
+scikit-learn>=1.4.0
+numpy>=1.26.0
+joblib>=1.3.0
+
+# -----------------------------------
+# Partie III — Classification sensible
+# -----------------------------------
+# (scikit-learn déjà listé ci-dessus)
+
+# ---------------------------------
+# Partie IV — Visualisation / Rapport
+# ---------------------------------
+plotly>=5.20.0
+jinja2>=3.1.0
+kaleido>=0.2.1          # Export PNG des graphiques Plotly
+
+# -----------------------------------
+# Extensions
+# -----------------------------------
+cryptography>=42.0.0    # Extension C : chiffrement AES-GCM
+
+# Optionnel Extension B :
+# pywin32>=306           # Windows uniquement
+# pygetwindow>=0.0.9     # Multiplateforme
+# psutil>=5.9.0          # Informations processus
+
+# Optionnel Extension E (NLP multilingue) :
+# langdetect>=1.0.9
+# transformers>=4.38.0
+# torch>=2.0.0
+
+# Optionnel Extension D (Dashboard web) :
+streamlit>=1.32.0
+# fastapi>=0.110.0
+# uvicorn>=0.27.0
+
+# ---------------------
+# Développement / Tests
+# ---------------------
+pytest>=8.0.0
