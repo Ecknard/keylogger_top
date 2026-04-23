@@ -1,18 +1,3 @@
-"""
-extension/dashboard.py — Extension D : Dashboard de supervision temps réel
-TP1 — Intelligence Artificielle & Cybersécurité
-
-Interface web locale (Streamlit) pour superviser en temps réel :
-    - Logs de frappes horodatés
-    - Évolution des sentiments
-    - Anomalies comportementales
-    - Données sensibles détectées
-    - Métriques de session en direct
-
-Lancement : streamlit run extension/dashboard.py
-URL locale  : http://localhost:8501
-"""
-
 import json
 import os
 import sys
@@ -23,12 +8,14 @@ from pathlib import Path
 import plotly.graph_objects as go
 import streamlit as st
 
+
 # ---------------------------------------------------------------------------
 # Résolution des chemins (fonctionne quelle que soit la CWD)
 # ---------------------------------------------------------------------------
 ROOT = Path(__file__).resolve().parent.parent
 DATA = ROOT / "data"
 sys.path.insert(0, str(ROOT))
+
 
 # ---------------------------------------------------------------------------
 # Configuration Streamlit — DOIT être le premier appel st.*
@@ -39,6 +26,7 @@ st.set_page_config(
     layout="wide",
     initial_sidebar_state="expanded",
 )
+
 
 # ---------------------------------------------------------------------------
 # CSS — Dark theme industriel / cybersec
@@ -208,17 +196,16 @@ def read_log_tail(path: Path, n_lines: int = 60) -> list:
 
 
 def load_all() -> dict:
-    import time as _t
     log_path = DATA / "log.txt"
     log_mtime = log_path.stat().st_mtime if log_path.exists() else 0
     return {
-        "sentiments":  load_json_safe(DATA / "sentiments.json"),
-        "alerts":      load_json_safe(DATA / "alerts.json"),
-        "detections":  load_json_safe(DATA / "detections.json"),
-        "metadata":    load_json_safe(DATA / "metadata.json"),
-        "log_lines":   read_log_tail(DATA / "log.txt"),
-        "ts":          datetime.now(),
-        "log_mtime":   log_mtime,
+        "sentiments": load_json_safe(DATA / "sentiments.json"),
+        "alerts": load_json_safe(DATA / "alerts.json"),
+        "detections": load_json_safe(DATA / "detections.json"),
+        "metadata": load_json_safe(DATA / "metadata.json"),
+        "log_lines": read_log_tail(DATA / "log.txt"),
+        "ts": datetime.now(),
+        "log_mtime": log_mtime,
     }
 
 
@@ -229,29 +216,30 @@ def load_all() -> dict:
 def compute_kpis(data: dict) -> dict:
     sents = data["sentiments"]
     alerts = data["alerts"]
-    dets   = data["detections"]
+    dets = data["detections"]
 
-    # FIX: exclure les trop_court du calcul des KPIs
-    valid_sents = [s for s in sents if s.get("label", s.get("sentiment","")) not in ("trop_court","erreur_librairie")]
-    scores    = [s.get("score", 0) for s in valid_sents]
+    valid_sents = [
+        s for s in sents
+        if s.get("label", s.get("sentiment", "")) not in ["trop_court", "erreur_librairie"]
+    ]
+
+    scores = [s.get("score", 0) for s in valid_sents]
     avg_score = round(sum(scores) / len(scores), 3) if scores else 0.0
 
-    labels  = [s.get("sentiment", s.get("label", "neutre")) for s in valid_sents]
+    labels = [s.get("sentiment", s.get("label", "neutre")) for s in valid_sents]
     pos_pct = int(labels.count("positif") * 100 / len(labels)) if labels else 0
 
-    recent_alerts = [a for a in alerts
-                     if _is_recent(a.get("timestamp", ""), minutes=60)]
-
+    recent_alerts = [a for a in alerts if _is_recent(a.get("timestamp", ""), minutes=60)]
     sensitive_today = sum(1 for d in dets if d.get("has_sensitive"))
 
     return {
-        "total_phrases":     len(valid_sents),
-        "avg_score":         avg_score,
-        "positive_pct":      pos_pct,
-        "total_alerts":      len(alerts),
-        "recent_alerts":     len(recent_alerts),
-        "sensitive_count":   sensitive_today,
-        "metadata_count":    len(data["metadata"]),
+        "total_phrases": len(valid_sents),
+        "avg_score": avg_score,
+        "positive_pct": pos_pct,
+        "total_alerts": len(alerts),
+        "recent_alerts": len(recent_alerts),
+        "sensitive_count": sensitive_today,
+        "metadata_count": len(data["metadata"]),
     }
 
 
@@ -279,40 +267,38 @@ DARK_LAYOUT = dict(
 
 
 def chart_sentiment_timeline(sentiments: list) -> go.Figure:
-    # FIX: filtrer les entrées trop_court (score=0, label=trop_court)
-    # elles provoquaient une ligne plate à y=0 masquant les vrais sentiments
-    valid = [s for s in sentiments if s.get("label", s.get("sentiment", "")) not in ("trop_court", "erreur_librairie")]
-
+    valid = [
+        s for s in sentiments
+        if s.get("label", s.get("sentiment", "")) not in ["trop_court", "erreur_librairie"]
+    ]
     if not valid:
-        return _empty_chart("Aucune phrase suffisamment longue analysée\n(min. 3 mots)")
+        return _empty_chart("Aucune phrase suffisamment longue à analyser")
 
     recent = valid[-80:]
-    ts     = [s["timestamp"] for s in recent]
+    ts = [s["timestamp"] for s in recent]
     scores = [s.get("score", 0) for s in recent]
     labels = [s.get("sentiment", s.get("label", "neutre")) for s in recent]
 
-    color_map = {"positif": "#3fb950", "négatif": "#f85149", "neutre": "#8b949e",
-                 "trop_court": "#484f58"}
+    color_map = {"positif": "#3fb950", "négatif": "#f85149", "neutre": "#8b949e", "trop_court": "#484f58"}
     marker_colors = [color_map.get(l, "#8b949e") for l in labels]
 
     fig = go.Figure()
-    fig.add_hrect(y0=0.05, y1=1,     fillcolor="#3fb950", opacity=0.05, line_width=0)
+    fig.add_hrect(y0=0.05, y1=1, fillcolor="#3fb950", opacity=0.05, line_width=0)
     fig.add_hrect(y0=-0.05, y1=0.05, fillcolor="#8b949e", opacity=0.04, line_width=0)
-    fig.add_hrect(y0=-1,    y1=-0.05, fillcolor="#f85149", opacity=0.05, line_width=0)
+    fig.add_hrect(y0=-1, y1=-0.05, fillcolor="#f85149", opacity=0.05, line_width=0)
 
     fig.add_trace(go.Scatter(
         x=ts, y=scores, mode="lines+markers",
         name="Sentiment",
         line=dict(color="#388bfd", width=1.5, shape="spline", smoothing=0.8),
         marker=dict(color=marker_colors, size=8, line=dict(color="#0a0e17", width=1)),
-        hovertemplate="<b>%{x|%H:%M:%S}</b><br>Score: %{y:.4f}<br>Label: %{text}<extra></extra>",
+        hovertemplate="<b>%{x}</b><br>Score: %{y:.4f}<br>Label: %{text}<extra></extra>",
         text=labels,
         fill="tozeroy",
         fillcolor="rgba(56,139,253,0.05)",
     ))
     fig.add_hline(y=0, line_dash="dot", line_color="#21262d")
 
-    # Annotations min/max pour la lisibilité
     if len(scores) >= 3:
         max_s, min_s = max(scores), min(scores)
         if max_s > 0.1:
@@ -341,8 +327,7 @@ def chart_delay_histogram(metadata: list) -> go.Figure:
     if not metadata:
         return _empty_chart("Aucune méta-donnée de frappe")
 
-    delays = [m["inter_key_delay"] for m in metadata
-              if 0.005 < m.get("inter_key_delay", 0) < 1.5]
+    delays = [m["inter_key_delay"] for m in metadata if 0.005 < m.get("inter_key_delay", 0) < 1.5]
     if not delays:
         return _empty_chart("Délais insuffisants")
 
@@ -369,7 +354,7 @@ def chart_activity_heatmap(metadata: list) -> go.Figure:
         return _empty_chart("Aucune méta-donnée de frappe")
 
     days_fr = ["Lun", "Mar", "Mer", "Jeu", "Ven", "Sam", "Dim"]
-    matrix  = [[0] * 24 for _ in range(7)]
+    matrix = [[0] * 24 for _ in range(7)]
 
     for m in metadata:
         try:
@@ -400,7 +385,7 @@ def chart_anomaly_scatter(alerts: list) -> go.Figure:
     if not alerts:
         return _empty_chart("Aucune anomalie détectée ✅")
 
-    ts     = [a["timestamp"] for a in alerts]
+    ts = [a["timestamp"] for a in alerts]
     scores = [a.get("score", -0.5) for a in alerts]
     recent = [_is_recent(a.get("timestamp", ""), 60) for a in alerts]
     colors = ["#f85149" if r else "#8b949e" for r in recent]
@@ -425,7 +410,7 @@ def chart_anomaly_scatter(alerts: list) -> go.Figure:
 
 def chart_sensitive_donut(detections: list) -> go.Figure:
     import collections
-    counts: dict = collections.Counter()
+    counts = collections.Counter()
     for r in detections:
         for d in r.get("detections", []):
             counts[d["type"]] += 1
@@ -499,7 +484,6 @@ def render_sidebar(kpis: dict) -> dict:
         st.markdown("<hr style='border:none; border-top:1px solid #21262d; margin:12px 0;'/>",
                     unsafe_allow_html=True)
 
-        # Statut des fichiers
         st.markdown("#### 📂 Sources de données")
         files_status = {
             "log.txt":        (DATA / "log.txt").exists(),
@@ -520,7 +504,6 @@ def render_sidebar(kpis: dict) -> dict:
         st.markdown("<hr style='border:none; border-top:1px solid #21262d; margin:12px 0;'/>",
                     unsafe_allow_html=True)
 
-        # Actions
         st.markdown("#### 🛠️ Actions")
         if st.button("🔄 Forcer le rafraîchissement", use_container_width=True):
             st.cache_data.clear()
@@ -537,7 +520,6 @@ def render_sidebar(kpis: dict) -> dict:
         st.markdown("<hr style='border:none; border-top:1px solid #21262d; margin:12px 0;'/>",
                     unsafe_allow_html=True)
 
-        # Avertissement éthique
         st.markdown("""
         <div style='background:rgba(248,81,73,.08); border:1px solid rgba(248,81,73,.3);
                     border-radius:8px; padding:12px; font-size:0.72em; color:#8b949e;
@@ -636,13 +618,11 @@ def render_log_viewer(log_lines: list, n: int = 40) -> None:
         line = line.rstrip()
         if not line:
             continue
-        # Lignes d'horodatage
         if line.startswith("[20"):
             lines_html += f'<div class="log-line"><span class="ts">{line}</span></div>'
         elif line.startswith("—"):
             lines_html += f'<div class="log-line" style="color:#21262d">{line}</div>'
         else:
-            # Masquer les potentielles données sensibles dans l'affichage
             safe_line = line[:120] + ("…" if len(line) > 120 else "")
             lines_html += f'<div class="log-line"><span class="txt">{safe_line}</span></div>'
 
@@ -735,8 +715,7 @@ def render_sentiment_table(sentiments: list) -> None:
     st.markdown('<div class="section-title">🧠 Dernières analyses sentiments</div>',
                 unsafe_allow_html=True)
 
-    # FIX: filtrer les trop_court avant d'afficher
-    valid_sents = [s for s in sentiments if s.get("label", s.get("sentiment", "")) not in ("trop_court", "erreur_librairie")]
+    valid_sents = [s for s in sentiments if s.get("label", s.get("sentiment", "")) not in ["trop_court", "erreur_librairie"]]
     recent = valid_sents[-12:]
     if not recent:
         st.markdown('<div style="color:#484f58; font-family:JetBrains Mono,monospace; font-size:0.82em;">Aucune donnée. Tapez des phrases complètes (min. 3 mots).</div>',
@@ -782,9 +761,7 @@ def render_sentiment_table(sentiments: list) -> None:
 # ---------------------------------------------------------------------------
 
 def render_global_view(data: dict, cfg: dict) -> None:
-    # Status bar
-    import time as _time
-    log_age = _time.time() - data["log_mtime"] if data.get("log_mtime") else float("inf")
+    log_age = time.time() - data["log_mtime"] if data.get("log_mtime") else float("inf")
     live_cls = "status-live" if log_age < 60 else "status-stale"
     live_txt = "EN DIRECT" if log_age < 60 else "⚠ DONNÉES FIGÉES"
     st.markdown(f"""
@@ -797,7 +774,6 @@ def render_global_view(data: dict, cfg: dict) -> None:
     if log_age > 120:
         st.warning("⚠️ **Keylogger inactif** — Lancez `python keylogger.py` pour alimenter le dashboard.", icon=None)
 
-    # Row 1 : Sentiment timeline + Heatmap
     col1, col2 = st.columns([2, 1])
     with col1:
         st.markdown('<div class="section-title">📈 Évolution des sentiments</div>',
@@ -810,14 +786,12 @@ def render_global_view(data: dict, cfg: dict) -> None:
         st.plotly_chart(chart_activity_heatmap(data["metadata"]),
                         use_container_width=True, config=plotly_cfg())
 
-    # Row 2 : Alertes + Détections
     col3, col4 = st.columns([1, 1])
     with col3:
         render_recent_alerts(data["alerts"])
     with col4:
         render_detections(data["detections"])
 
-    # Row 3 : Histogramme délais + Donut sensibles
     col5, col6 = st.columns([1, 1])
     with col5:
         st.markdown('<div class="section-title">⌨️ Délais inter-touches</div>',
@@ -830,7 +804,6 @@ def render_global_view(data: dict, cfg: dict) -> None:
         st.plotly_chart(chart_sensitive_donut(data["detections"]),
                         use_container_width=True, config=plotly_cfg())
 
-    # Row 4 : Log + Sentiments table
     col7, col8 = st.columns([3, 2])
     with col7:
         render_log_viewer(data["log_lines"], cfg["n_log"])
@@ -853,7 +826,6 @@ def render_sentiments_view(data: dict) -> None:
 
     st.plotly_chart(chart_sentiment_timeline(sents), use_container_width=True, config=plotly_cfg())
 
-    # Répartition en barres
     import collections
     label_counts = collections.Counter(s.get("sentiment","neutre") for s in sents)
     total = len(sents)
@@ -923,20 +895,13 @@ def render_logs_view(data: dict, n: int) -> None:
 # ---------------------------------------------------------------------------
 
 def main() -> None:
-    # Chargement direct sans cache — garantit les données fraîches du keylogger
     data = load_all()
     kpis = compute_kpis(data)
 
-    # Sidebar
     cfg = render_sidebar(kpis)
-
-    # Header
     render_header(kpis, data["ts"])
-
-    # KPIs
     render_kpis(kpis)
 
-    # Contenu selon la vue sélectionnée
     view = cfg["view"]
     if view == "Vue globale":
         render_global_view(data, cfg)
@@ -949,7 +914,6 @@ def main() -> None:
     elif view == "Logs bruts":
         render_logs_view(data, cfg["n_log"])
 
-    # Auto-refresh via st.rerun après N secondes
     time.sleep(cfg["refresh"])
     st.rerun()
 
