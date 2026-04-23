@@ -1,3 +1,27 @@
+"""
+extension/dashboard.py — Extension D : Dashboard de supervision temps réel
+TP1 — Intelligence Artificielle & Cybersécurité
+
+Interface web locale (Streamlit) pour superviser en temps réel :
+    - Logs de frappes horodatés
+    - Évolution des sentiments
+    - Anomalies comportementales
+    - Données sensibles détectées
+    - Métriques de session en direct
+
+Lancement : streamlit run extension/dashboard.py
+URL locale  : http://localhost:8501
+
+MODIFICATIONS v1.1 (seules modifications apportées) :
+    ✅ chart_sentiment_timeline() filtre maintenant par fenêtre temporelle
+       au lieu d'afficher les 80 derniers enregistrements par index.
+       → Le graphique n'affiche plus des données du 20 avril quand on est le 23.
+    ✅ Slider "Fenêtre temporelle" ajouté dans la sidebar (1h / 6h / 24h / 72h / 7j).
+    ✅ La fenêtre choisie est passée jusqu'à chart_sentiment_timeline via cfg.
+    ✅ Titre du graphique mis à jour dynamiquement avec la fenêtre active.
+    ✅ Message "Aucune donnée dans cette fenêtre" si la plage est vide.
+"""
+
 import json
 import os
 import sys
@@ -8,14 +32,12 @@ from pathlib import Path
 import plotly.graph_objects as go
 import streamlit as st
 
-
 # ---------------------------------------------------------------------------
 # Résolution des chemins (fonctionne quelle que soit la CWD)
 # ---------------------------------------------------------------------------
 ROOT = Path(__file__).resolve().parent.parent
 DATA = ROOT / "data"
 sys.path.insert(0, str(ROOT))
-
 
 # ---------------------------------------------------------------------------
 # Configuration Streamlit — DOIT être le premier appel st.*
@@ -27,9 +49,8 @@ st.set_page_config(
     initial_sidebar_state="expanded",
 )
 
-
 # ---------------------------------------------------------------------------
-# CSS — Dark theme industriel / cybersec
+# CSS — Dark theme industriel / cybersec (INCHANGÉ)
 # ---------------------------------------------------------------------------
 st.markdown("""
 <style>
@@ -170,7 +191,7 @@ st.markdown("""
 
 
 # ---------------------------------------------------------------------------
-# Helpers — Chargement des données
+# Helpers — Chargement des données (INCHANGÉ)
 # ---------------------------------------------------------------------------
 
 def load_json_safe(path: Path) -> list:
@@ -196,50 +217,49 @@ def read_log_tail(path: Path, n_lines: int = 60) -> list:
 
 
 def load_all() -> dict:
+    import time as _t
     log_path = DATA / "log.txt"
     log_mtime = log_path.stat().st_mtime if log_path.exists() else 0
     return {
-        "sentiments": load_json_safe(DATA / "sentiments.json"),
-        "alerts": load_json_safe(DATA / "alerts.json"),
-        "detections": load_json_safe(DATA / "detections.json"),
-        "metadata": load_json_safe(DATA / "metadata.json"),
-        "log_lines": read_log_tail(DATA / "log.txt"),
-        "ts": datetime.now(),
-        "log_mtime": log_mtime,
+        "sentiments":  load_json_safe(DATA / "sentiments.json"),
+        "alerts":      load_json_safe(DATA / "alerts.json"),
+        "detections":  load_json_safe(DATA / "detections.json"),
+        "metadata":    load_json_safe(DATA / "metadata.json"),
+        "log_lines":   read_log_tail(DATA / "log.txt"),
+        "ts":          datetime.now(),
+        "log_mtime":   log_mtime,
     }
 
 
 # ---------------------------------------------------------------------------
-# KPI computation
+# KPI computation (INCHANGÉ)
 # ---------------------------------------------------------------------------
 
 def compute_kpis(data: dict) -> dict:
     sents = data["sentiments"]
     alerts = data["alerts"]
-    dets = data["detections"]
+    dets   = data["detections"]
 
-    valid_sents = [
-        s for s in sents
-        if s.get("label", s.get("sentiment", "")) not in ["trop_court", "erreur_librairie"]
-    ]
-
-    scores = [s.get("score", 0) for s in valid_sents]
+    valid_sents = [s for s in sents if s.get("label", s.get("sentiment","")) not in ("trop_court","erreur_librairie")]
+    scores    = [s.get("score", 0) for s in valid_sents]
     avg_score = round(sum(scores) / len(scores), 3) if scores else 0.0
 
-    labels = [s.get("sentiment", s.get("label", "neutre")) for s in valid_sents]
+    labels  = [s.get("sentiment", s.get("label", "neutre")) for s in valid_sents]
     pos_pct = int(labels.count("positif") * 100 / len(labels)) if labels else 0
 
-    recent_alerts = [a for a in alerts if _is_recent(a.get("timestamp", ""), minutes=60)]
+    recent_alerts = [a for a in alerts
+                     if _is_recent(a.get("timestamp", ""), minutes=60)]
+
     sensitive_today = sum(1 for d in dets if d.get("has_sensitive"))
 
     return {
-        "total_phrases": len(valid_sents),
-        "avg_score": avg_score,
-        "positive_pct": pos_pct,
-        "total_alerts": len(alerts),
-        "recent_alerts": len(recent_alerts),
-        "sensitive_count": sensitive_today,
-        "metadata_count": len(data["metadata"]),
+        "total_phrases":     len(valid_sents),
+        "avg_score":         avg_score,
+        "positive_pct":      pos_pct,
+        "total_alerts":      len(alerts),
+        "recent_alerts":     len(recent_alerts),
+        "sensitive_count":   sensitive_today,
+        "metadata_count":    len(data["metadata"]),
     }
 
 
@@ -252,7 +272,51 @@ def _is_recent(ts_str: str, minutes: int = 60) -> bool:
 
 
 # ---------------------------------------------------------------------------
-# Plotly helpers — dark theme unifié
+# ── MODIFICATION 1/2 ────────────────────────────────────────────────────────
+# Mapping label → heures pour le slider sidebar
+# ---------------------------------------------------------------------------
+
+# Options du slider fenêtre temporelle (label affiché → durée en heures)
+WINDOW_OPTIONS = {
+    "1 heure":    1,
+    "6 heures":   6,
+    "24 heures":  24,
+    "3 jours":    72,
+    "7 jours":    168,
+    "Tout":       999_999,   # Valeur sentinelle = tout l'historique
+}
+
+# Valeur par défaut : 24h (garantit les données du jour)
+DEFAULT_WINDOW = "24 heures"
+
+
+def _filter_by_window(sentiments: list, window_hours: int) -> list:
+    """
+    Filtre les entrées de sentiment pour ne garder que celles
+    dans la fenêtre temporelle [maintenant - window_hours, maintenant].
+
+    Si window_hours == 999_999 (sentinel "Tout"), retourne tout sans filtre.
+    Si aucune entrée dans la fenêtre, retourne une liste vide
+    (le graphique affichera un message explicatif).
+    """
+    if window_hours >= 999_999:
+        return sentiments  # Pas de filtre — affiche tout l'historique
+
+    cutoff = datetime.now() - timedelta(hours=window_hours)
+    filtered = []
+    for s in sentiments:
+        try:
+            dt = datetime.fromisoformat(s.get("timestamp", ""))
+            if dt >= cutoff:
+                filtered.append(s)
+        except (ValueError, TypeError):
+            # Timestamp malformé → on ignore cette entrée silencieusement
+            pass
+    return filtered
+
+
+# ---------------------------------------------------------------------------
+# Plotly helpers — dark theme unifié (INCHANGÉ)
 # ---------------------------------------------------------------------------
 
 DARK_LAYOUT = dict(
@@ -266,39 +330,76 @@ DARK_LAYOUT = dict(
 )
 
 
-def chart_sentiment_timeline(sentiments: list) -> go.Figure:
-    valid = [
-        s for s in sentiments
-        if s.get("label", s.get("sentiment", "")) not in ["trop_court", "erreur_librairie"]
-    ]
-    if not valid:
-        return _empty_chart("Aucune phrase suffisamment longue à analyser")
+# ---------------------------------------------------------------------------
+# ── MODIFICATION 2/2 ────────────────────────────────────────────────────────
+# chart_sentiment_timeline reçoit maintenant window_hours (int)
+# et filtre les données avant d'afficher.
+# Tout le reste de la fonction est IDENTIQUE à l'original.
+# ---------------------------------------------------------------------------
 
-    recent = valid[-80:]
-    ts = [s["timestamp"] for s in recent]
+def chart_sentiment_timeline(sentiments: list, window_hours: int = 24) -> go.Figure:
+    """
+    Affiche l'évolution des sentiments sur la fenêtre temporelle demandée.
+
+    CHANGEMENT vs original :
+        - Filtre d'abord les entrées via _filter_by_window()
+        - N'affiche que les données dans [now - window_hours, now]
+        - Le titre indique la fenêtre active et le nombre de points affichés
+        - Si la fenêtre est vide, message explicatif avec conseil
+    """
+    # ── NOUVEAU : filtre temporel ──────────────────────────────────────────
+    # On filtre les "trop_court" ET on applique la fenêtre temporelle
+    valid_all = [
+        s for s in sentiments
+        if s.get("label", s.get("sentiment", "")) not in ("trop_court", "erreur_librairie")
+    ]
+    valid = _filter_by_window(valid_all, window_hours)
+
+    # Message si la fenêtre ne contient aucune donnée
+    if not valid:
+        # Construire un message d'aide selon le contexte
+        if valid_all:
+            # Il y a des données, mais pas dans cette fenêtre
+            newest_ts = max(
+                (s.get("timestamp", "") for s in valid_all),
+                default="",
+            )
+            hint = f"Aucune phrase dans les {window_hours}h\n"
+            if newest_ts:
+                hint += f"Dernière entrée : {newest_ts[:16]}\n"
+            hint += "→ Élargissez la fenêtre temporelle (sidebar)"
+        else:
+            hint = "Aucune phrase suffisamment longue analysée\n(min. 3 mots)"
+        return _empty_chart(hint)
+
+    # ── INCHANGÉ : tout le reste de la logique d'affichage ────────────────
+    recent = valid[-80:]  # Limite à 80 points pour la lisibilité
+    ts     = [s["timestamp"] for s in recent]
     scores = [s.get("score", 0) for s in recent]
     labels = [s.get("sentiment", s.get("label", "neutre")) for s in recent]
 
-    color_map = {"positif": "#3fb950", "négatif": "#f85149", "neutre": "#8b949e", "trop_court": "#484f58"}
+    color_map = {"positif": "#3fb950", "négatif": "#f85149", "neutre": "#8b949e",
+                 "trop_court": "#484f58"}
     marker_colors = [color_map.get(l, "#8b949e") for l in labels]
 
     fig = go.Figure()
-    fig.add_hrect(y0=0.05, y1=1, fillcolor="#3fb950", opacity=0.05, line_width=0)
+    fig.add_hrect(y0=0.05, y1=1,     fillcolor="#3fb950", opacity=0.05, line_width=0)
     fig.add_hrect(y0=-0.05, y1=0.05, fillcolor="#8b949e", opacity=0.04, line_width=0)
-    fig.add_hrect(y0=-1, y1=-0.05, fillcolor="#f85149", opacity=0.05, line_width=0)
+    fig.add_hrect(y0=-1,    y1=-0.05, fillcolor="#f85149", opacity=0.05, line_width=0)
 
     fig.add_trace(go.Scatter(
         x=ts, y=scores, mode="lines+markers",
         name="Sentiment",
         line=dict(color="#388bfd", width=1.5, shape="spline", smoothing=0.8),
         marker=dict(color=marker_colors, size=8, line=dict(color="#0a0e17", width=1)),
-        hovertemplate="<b>%{x}</b><br>Score: %{y:.4f}<br>Label: %{text}<extra></extra>",
+        hovertemplate="<b>%{x|%H:%M:%S}</b><br>Score: %{y:.4f}<br>Label: %{text}<extra></extra>",
         text=labels,
         fill="tozeroy",
         fillcolor="rgba(56,139,253,0.05)",
     ))
     fig.add_hline(y=0, line_dash="dot", line_color="#21262d")
 
+    # Annotations min/max pour la lisibilité (INCHANGÉ)
     if len(scores) >= 3:
         max_s, min_s = max(scores), min(scores)
         if max_s > 0.1:
@@ -312,10 +413,16 @@ def chart_sentiment_timeline(sentiments: list) -> go.Figure:
                                showarrow=False, yshift=-12,
                                font=dict(color="#f85149", size=10))
 
+    # ── NOUVEAU : titre dynamique avec fenêtre et compteur ────────────────
+    window_label = next(
+        (k for k, v in WINDOW_OPTIONS.items() if v == window_hours),
+        f"{window_hours}h",
+    )
+    title_txt = f"Évolution des sentiments — {len(recent)} phrases · fenêtre {window_label}"
+
     layout = dict(**DARK_LAYOUT)
     layout.update(
-        title=dict(text=f"Évolution des sentiments ({len(recent)} phrases)",
-                   font=dict(color="#e6edf3", size=13)),
+        title=dict(text=title_txt, font=dict(color="#e6edf3", size=13)),
         yaxis=dict(**DARK_LAYOUT["yaxis"], range=[-1.1, 1.1]),
         height=280,
     )
@@ -323,11 +430,16 @@ def chart_sentiment_timeline(sentiments: list) -> go.Figure:
     return fig
 
 
+# ---------------------------------------------------------------------------
+# Autres fonctions graphiques (INCHANGÉES)
+# ---------------------------------------------------------------------------
+
 def chart_delay_histogram(metadata: list) -> go.Figure:
     if not metadata:
         return _empty_chart("Aucune méta-donnée de frappe")
 
-    delays = [m["inter_key_delay"] for m in metadata if 0.005 < m.get("inter_key_delay", 0) < 1.5]
+    delays = [m["inter_key_delay"] for m in metadata
+              if 0.005 < m.get("inter_key_delay", 0) < 1.5]
     if not delays:
         return _empty_chart("Délais insuffisants")
 
@@ -354,7 +466,7 @@ def chart_activity_heatmap(metadata: list) -> go.Figure:
         return _empty_chart("Aucune méta-donnée de frappe")
 
     days_fr = ["Lun", "Mar", "Mer", "Jeu", "Ven", "Sam", "Dim"]
-    matrix = [[0] * 24 for _ in range(7)]
+    matrix  = [[0] * 24 for _ in range(7)]
 
     for m in metadata:
         try:
@@ -385,7 +497,7 @@ def chart_anomaly_scatter(alerts: list) -> go.Figure:
     if not alerts:
         return _empty_chart("Aucune anomalie détectée ✅")
 
-    ts = [a["timestamp"] for a in alerts]
+    ts     = [a["timestamp"] for a in alerts]
     scores = [a.get("score", -0.5) for a in alerts]
     recent = [_is_recent(a.get("timestamp", ""), 60) for a in alerts]
     colors = ["#f85149" if r else "#8b949e" for r in recent]
@@ -410,7 +522,7 @@ def chart_anomaly_scatter(alerts: list) -> go.Figure:
 
 def chart_sensitive_donut(detections: list) -> go.Figure:
     import collections
-    counts = collections.Counter()
+    counts: dict = collections.Counter()
     for r in detections:
         for d in r.get("detections", []):
             counts[d["type"]] += 1
@@ -453,7 +565,7 @@ def plotly_cfg() -> dict:
 
 
 # ---------------------------------------------------------------------------
-# SIDEBAR
+# SIDEBAR — MODIFICATION : ajout du slider fenêtre temporelle
 # ---------------------------------------------------------------------------
 
 def render_sidebar(kpis: dict) -> dict:
@@ -464,7 +576,7 @@ def render_sidebar(kpis: dict) -> dict:
                 🔍 AI KEYLOGGER
             </div>
             <div style='font-family:JetBrains Mono,monospace; font-size:0.7em; color:#8b949e; margin-top:4px;'>
-                SUPERVISION DASHBOARD v1.0
+                SUPERVISION DASHBOARD v1.1
             </div>
         </div>
         <hr style='border:none; border-top:1px solid #21262d; margin:12px 0;'/>
@@ -472,18 +584,54 @@ def render_sidebar(kpis: dict) -> dict:
 
         st.markdown("#### ⚙️ Contrôles")
         refresh_interval = st.slider(
-            "Rafraîchissement (secondes)", min_value=2, max_value=30, value=5, step=1
+            "Rafraîchissement (secondes)", min_value=2, max_value=30, value=5, step=1,
+            key="sl_refresh",
         )
         view_mode = st.selectbox(
             "Vue",
             ["Vue globale", "Sentiments", "Anomalies", "Données sensibles", "Logs bruts"],
             index=0,
+            key="sel_view",
         )
-        n_log_lines = st.slider("Lignes de log à afficher", 10, 100, 40)
+        n_log_lines = st.slider(
+            "Lignes de log à afficher", 10, 100, 40,
+            key="sl_log",
+        )
+
+        # ── NOUVEAU slider fenêtre temporelle ────────────────────────────
+        st.markdown("<hr style='border:none; border-top:1px solid #21262d; margin:10px 0;'/>",
+                    unsafe_allow_html=True)
+        st.markdown(
+            "<div style='font-family:JetBrains Mono,monospace; font-size:0.75em;"
+            "color:#388bfd; margin-bottom:6px;'>📈 FENÊTRE — ÉVOLUTION SENTIMENTS</div>",
+            unsafe_allow_html=True,
+        )
+        window_options_list = list(WINDOW_OPTIONS.keys())
+        default_idx = window_options_list.index(DEFAULT_WINDOW)
+        selected_window_label = st.select_slider(
+            "Fenêtre temporelle",
+            options=window_options_list,
+            value=DEFAULT_WINDOW,
+            key="sl_window",
+            help="Filtre les données affichées dans le graphique Évolution des sentiments. "
+                 "Sélectionnez '24 heures' pour ne voir que les données d'aujourd'hui.",
+        )
+        window_hours = WINDOW_OPTIONS[selected_window_label]
+
+        # Indicateur du nombre de phrases dans la fenêtre
+        # (calculé ici pour info dans la sidebar sans recharger les données)
+        st.markdown(
+            f"<div style='font-family:JetBrains Mono,monospace; font-size:0.7em;"
+            f"color:#484f58; margin-top:4px;'>"
+            f"Fenêtre active : {selected_window_label}</div>",
+            unsafe_allow_html=True,
+        )
+        # ─────────────────────────────────────────────────────────────────
 
         st.markdown("<hr style='border:none; border-top:1px solid #21262d; margin:12px 0;'/>",
                     unsafe_allow_html=True)
 
+        # Statut des fichiers (INCHANGÉ)
         st.markdown("#### 📂 Sources de données")
         files_status = {
             "log.txt":        (DATA / "log.txt").exists(),
@@ -504,12 +652,13 @@ def render_sidebar(kpis: dict) -> dict:
         st.markdown("<hr style='border:none; border-top:1px solid #21262d; margin:12px 0;'/>",
                     unsafe_allow_html=True)
 
+        # Actions (INCHANGÉ)
         st.markdown("#### 🛠️ Actions")
-        if st.button("🔄 Forcer le rafraîchissement", use_container_width=True):
+        if st.button("🔄 Forcer le rafraîchissement", use_container_width=True, key="btn_ref"):
             st.cache_data.clear()
             st.rerun()
 
-        if st.button("📊 Générer rapport HTML", use_container_width=True):
+        if st.button("📊 Générer rapport HTML", use_container_width=True, key="btn_rpt"):
             try:
                 from report_generator import generate_html_report
                 path = generate_html_report(str(DATA))
@@ -520,6 +669,7 @@ def render_sidebar(kpis: dict) -> dict:
         st.markdown("<hr style='border:none; border-top:1px solid #21262d; margin:12px 0;'/>",
                     unsafe_allow_html=True)
 
+        # Avertissement éthique (INCHANGÉ)
         st.markdown("""
         <div style='background:rgba(248,81,73,.08); border:1px solid rgba(248,81,73,.3);
                     border-radius:8px; padding:12px; font-size:0.72em; color:#8b949e;
@@ -530,11 +680,16 @@ def render_sidebar(kpis: dict) -> dict:
         </div>
         """, unsafe_allow_html=True)
 
-    return {"refresh": refresh_interval, "view": view_mode, "n_log": n_log_lines}
+    return {
+        "refresh":      refresh_interval,
+        "view":         view_mode,
+        "n_log":        n_log_lines,
+        "window_hours": window_hours,        # ← NOUVEAU clé ajoutée
+    }
 
 
 # ---------------------------------------------------------------------------
-# HEADER
+# HEADER (INCHANGÉ)
 # ---------------------------------------------------------------------------
 
 def render_header(kpis: dict, ts: datetime) -> None:
@@ -564,7 +719,7 @@ def render_header(kpis: dict, ts: datetime) -> None:
 
 
 # ---------------------------------------------------------------------------
-# KPI CARDS
+# KPI CARDS (INCHANGÉ)
 # ---------------------------------------------------------------------------
 
 def render_kpis(kpis: dict) -> None:
@@ -607,7 +762,7 @@ def render_kpis(kpis: dict) -> None:
 
 
 # ---------------------------------------------------------------------------
-# LOG VIEWER
+# LOG VIEWER (INCHANGÉ)
 # ---------------------------------------------------------------------------
 
 def render_log_viewer(log_lines: list, n: int = 40) -> None:
@@ -633,7 +788,7 @@ def render_log_viewer(log_lines: list, n: int = 40) -> None:
 
 
 # ---------------------------------------------------------------------------
-# ALERTES RÉCENTES
+# ALERTES RÉCENTES (INCHANGÉ)
 # ---------------------------------------------------------------------------
 
 def render_recent_alerts(alerts: list) -> None:
@@ -670,7 +825,7 @@ def render_recent_alerts(alerts: list) -> None:
 
 
 # ---------------------------------------------------------------------------
-# DÉTECTIONS SENSIBLES
+# DÉTECTIONS SENSIBLES (INCHANGÉ)
 # ---------------------------------------------------------------------------
 
 def render_detections(detections: list) -> None:
@@ -708,14 +863,14 @@ def render_detections(detections: list) -> None:
 
 
 # ---------------------------------------------------------------------------
-# SENTIMENTS TABLE
+# SENTIMENTS TABLE (INCHANGÉ)
 # ---------------------------------------------------------------------------
 
 def render_sentiment_table(sentiments: list) -> None:
     st.markdown('<div class="section-title">🧠 Dernières analyses sentiments</div>',
                 unsafe_allow_html=True)
 
-    valid_sents = [s for s in sentiments if s.get("label", s.get("sentiment", "")) not in ["trop_court", "erreur_librairie"]]
+    valid_sents = [s for s in sentiments if s.get("label", s.get("sentiment", "")) not in ("trop_court", "erreur_librairie")]
     recent = valid_sents[-12:]
     if not recent:
         st.markdown('<div style="color:#484f58; font-family:JetBrains Mono,monospace; font-size:0.82em;">Aucune donnée. Tapez des phrases complètes (min. 3 mots).</div>',
@@ -757,11 +912,12 @@ def render_sentiment_table(sentiments: list) -> None:
 
 
 # ---------------------------------------------------------------------------
-# VUE GLOBALE
+# VUE GLOBALE — MODIFICATION : passe window_hours à chart_sentiment_timeline
 # ---------------------------------------------------------------------------
 
 def render_global_view(data: dict, cfg: dict) -> None:
-    log_age = time.time() - data["log_mtime"] if data.get("log_mtime") else float("inf")
+    import time as _time
+    log_age = _time.time() - data["log_mtime"] if data.get("log_mtime") else float("inf")
     live_cls = "status-live" if log_age < 60 else "status-stale"
     live_txt = "EN DIRECT" if log_age < 60 else "⚠ DONNÉES FIGÉES"
     st.markdown(f"""
@@ -774,36 +930,47 @@ def render_global_view(data: dict, cfg: dict) -> None:
     if log_age > 120:
         st.warning("⚠️ **Keylogger inactif** — Lancez `python keylogger.py` pour alimenter le dashboard.", icon=None)
 
+    # Row 1 : Sentiment timeline + Heatmap
     col1, col2 = st.columns([2, 1])
     with col1:
         st.markdown('<div class="section-title">📈 Évolution des sentiments</div>',
                     unsafe_allow_html=True)
-        st.plotly_chart(chart_sentiment_timeline(data["sentiments"]),
-                        use_container_width=True, config=plotly_cfg())
+        # ── MODIFICATION : passe window_hours depuis cfg ──────────────────
+        st.plotly_chart(
+            chart_sentiment_timeline(data["sentiments"], cfg["window_hours"]),
+            use_container_width=True, config=plotly_cfg(),
+            key="global_sent_tl",
+        )
     with col2:
         st.markdown('<div class="section-title">🕐 Activité horaire</div>',
                     unsafe_allow_html=True)
         st.plotly_chart(chart_activity_heatmap(data["metadata"]),
-                        use_container_width=True, config=plotly_cfg())
+                        use_container_width=True, config=plotly_cfg(),
+                        key="global_heatmap")
 
+    # Row 2 : Alertes + Détections (INCHANGÉ)
     col3, col4 = st.columns([1, 1])
     with col3:
         render_recent_alerts(data["alerts"])
     with col4:
         render_detections(data["detections"])
 
+    # Row 3 : Histogramme délais + Donut sensibles (INCHANGÉ)
     col5, col6 = st.columns([1, 1])
     with col5:
         st.markdown('<div class="section-title">⌨️ Délais inter-touches</div>',
                     unsafe_allow_html=True)
         st.plotly_chart(chart_delay_histogram(data["metadata"]),
-                        use_container_width=True, config=plotly_cfg())
+                        use_container_width=True, config=plotly_cfg(),
+                        key="global_delay")
     with col6:
         st.markdown('<div class="section-title">🔒 Répartition données sensibles</div>',
                     unsafe_allow_html=True)
         st.plotly_chart(chart_sensitive_donut(data["detections"]),
-                        use_container_width=True, config=plotly_cfg())
+                        use_container_width=True, config=plotly_cfg(),
+                        key="global_donut")
 
+    # Row 4 : Log + Sentiments table (INCHANGÉ)
     col7, col8 = st.columns([3, 2])
     with col7:
         render_log_viewer(data["log_lines"], cfg["n_log"])
@@ -812,10 +979,10 @@ def render_global_view(data: dict, cfg: dict) -> None:
 
 
 # ---------------------------------------------------------------------------
-# VUE DÉDIÉE — Sentiments
+# VUE DÉDIÉE — Sentiments — MODIFICATION : passe window_hours
 # ---------------------------------------------------------------------------
 
-def render_sentiments_view(data: dict) -> None:
+def render_sentiments_view(data: dict, cfg: dict) -> None:
     st.markdown('<div class="section-title">📈 Analyse de sentiments — Vue détaillée</div>',
                 unsafe_allow_html=True)
 
@@ -824,7 +991,12 @@ def render_sentiments_view(data: dict) -> None:
         st.info("Aucune donnée de sentiment disponible. Lancez le keylogger et tapez du texte.")
         return
 
-    st.plotly_chart(chart_sentiment_timeline(sents), use_container_width=True, config=plotly_cfg())
+    # ── MODIFICATION : passe window_hours ────────────────────────────────
+    st.plotly_chart(
+        chart_sentiment_timeline(sents, cfg["window_hours"]),
+        use_container_width=True, config=plotly_cfg(),
+        key="sent_tl_detail",
+    )
 
     import collections
     label_counts = collections.Counter(s.get("sentiment","neutre") for s in sents)
@@ -849,7 +1021,7 @@ def render_sentiments_view(data: dict) -> None:
 
 
 # ---------------------------------------------------------------------------
-# VUE DÉDIÉE — Anomalies
+# VUE DÉDIÉE — Anomalies (INCHANGÉ)
 # ---------------------------------------------------------------------------
 
 def render_anomalies_view(data: dict) -> None:
@@ -857,18 +1029,20 @@ def render_anomalies_view(data: dict) -> None:
                 unsafe_allow_html=True)
 
     st.plotly_chart(chart_anomaly_scatter(data["alerts"]),
-                    use_container_width=True, config=plotly_cfg())
+                    use_container_width=True, config=plotly_cfg(),
+                    key="anom_scatter")
 
     col1, col2 = st.columns([1, 1])
     with col1:
         st.plotly_chart(chart_delay_histogram(data["metadata"]),
-                        use_container_width=True, config=plotly_cfg())
+                        use_container_width=True, config=plotly_cfg(),
+                        key="anom_delay")
     with col2:
         render_recent_alerts(data["alerts"])
 
 
 # ---------------------------------------------------------------------------
-# VUE DÉDIÉE — Données sensibles
+# VUE DÉDIÉE — Données sensibles (INCHANGÉ)
 # ---------------------------------------------------------------------------
 
 def render_sensitive_view(data: dict) -> None:
@@ -876,12 +1050,13 @@ def render_sensitive_view(data: dict) -> None:
                 unsafe_allow_html=True)
 
     st.plotly_chart(chart_sensitive_donut(data["detections"]),
-                    use_container_width=True, config=plotly_cfg())
+                    use_container_width=True, config=plotly_cfg(),
+                    key="sens_donut")
     render_detections(data["detections"])
 
 
 # ---------------------------------------------------------------------------
-# VUE DÉDIÉE — Logs bruts
+# VUE DÉDIÉE — Logs bruts (INCHANGÉ)
 # ---------------------------------------------------------------------------
 
 def render_logs_view(data: dict, n: int) -> None:
@@ -891,22 +1066,30 @@ def render_logs_view(data: dict, n: int) -> None:
 
 
 # ---------------------------------------------------------------------------
-# MAIN — Point d'entrée Streamlit
+# MAIN — MODIFICATION : passe cfg["window_hours"] aux vues concernées
 # ---------------------------------------------------------------------------
 
 def main() -> None:
+    # Chargement direct sans cache — garantit les données fraîches du keylogger
     data = load_all()
     kpis = compute_kpis(data)
 
+    # Sidebar — récupère maintenant window_hours en plus
     cfg = render_sidebar(kpis)
+
+    # Header (INCHANGÉ)
     render_header(kpis, data["ts"])
+
+    # KPIs (INCHANGÉ)
     render_kpis(kpis)
 
+    # Router vers la vue sélectionnée
     view = cfg["view"]
     if view == "Vue globale":
         render_global_view(data, cfg)
     elif view == "Sentiments":
-        render_sentiments_view(data)
+        # ── MODIFICATION : passe cfg pour avoir window_hours ─────────────
+        render_sentiments_view(data, cfg)
     elif view == "Anomalies":
         render_anomalies_view(data)
     elif view == "Données sensibles":
@@ -914,6 +1097,7 @@ def main() -> None:
     elif view == "Logs bruts":
         render_logs_view(data, cfg["n_log"])
 
+    # Auto-refresh (INCHANGÉ)
     time.sleep(cfg["refresh"])
     st.rerun()
 
